@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+
+# Pre-trained models (too large for git)
+models_pretrained/
+*.joblib
+*.pkl
+*.pt
+*.pth
+*.onnx
+
+# Data files (download separately)
+data/*.csv
+data/*.json
+data/*.parquet
+!data/readme.md
+
+# Outputs
+outputs/
+metrics*.json
+*.png
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Coverage
+.coverage
+htmlcov/

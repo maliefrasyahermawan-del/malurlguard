@@ -1,0 +1,11 @@
+url,label,expected_label
+https://github.com/torvalds/linux,0,benign
+https://python.org/downloads,0,benign
+https://stackoverflow.com/questions/123/how-to,0,benign
+http://paypal-verify-account.tk/login.php?id=123&token=abc,1,phishing
+http://192.168.1.1@banking-secure.xyz/verify?email=user@test.com,1,phishing
+http://secure-paypal-login.cf/signin?next=/dashboard,1,phishing
+http://185.220.101.5/update.exe?cmd=download,2,malware
+http://free-keygen.pw/crack.bat,2,malware
+http://example.go.id/hacked-by-anonymous.html,3,defacement
+http://schoolsite.edu/index.php?id=1%27%20OR%201=1--,3,defacement

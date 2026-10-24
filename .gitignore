@@ -1,0 +1,22 @@
+# Local agent/editor settings
+.claude/
+.vscode/
+.idea/
+
+# Python runtime files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+
+# Generated model, dataset, and report artifacts
+malurlguard/models_pretrained/
+malurlguard/data/*.csv
+malurlguard/data/*.json
+malurlguard/outputs/
+malurlguard/*.joblib
+malurlguard/*.pkl
+malurlguard/*.png

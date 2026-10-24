@@ -1,0 +1,1147 @@
+================================================================================
+         MALURLGUARD — PANDUAN LENGKAP PENGGUNAAN
+         ML-based Malicious URL Classifier
+         MBC Telkom University — Network Security Lab
+================================================================================
+
+Dibuat untuk: Lab MBC Telkom University
+Target pengguna: Network Admin, Security Researcher, Mahasiswa Cybersecurity
+Versi: 1.0 (Phase 1 — Random Forest + XGBoost, Lexical Features)
+
+================================================================================
+DAFTAR ISI
+================================================================================
+
+  1. APA ITU MALURLGUARD?
+  2. FUNGSI UTAMA
+  3. ARSITEKTUR SISTEM
+  4. CARA INSTALL
+  5. CARA MENGGUNAKAN (CLI)
+     5.1 Generate Dataset
+     5.2 Training Model
+     5.3 Prediksi Satu URL
+     5.4 Prediksi Massal (Batch)
+     5.5 Menjalankan REST API
+     5.6 Menjalankan Dashboard
+  6. CARA MENGGUNAKAN (REST API)
+     6.1 Endpoint Health Check
+     6.2 Endpoint Prediksi Satu URL
+     6.3 Endpoint Prediksi Batch
+     6.4 Endpoint Metrics
+  7. PENJELASAN FITUR (41 FITUR LEXICAL)
+  8. PENJELASAN MODEL MACHINE LEARNING
+  9. PENJELASAN LABEL / KATEGORI
+  10. CONTOH OUTPUT DAN CARA MEMBACANYA
+  11. STRUKTUR FOLDER PROJECT
+  12. TROUBLESHOOTING
+  13. ROADMAP FASE BERIKUTNYA
+
+================================================================================
+1. APA ITU MALURLGUARD?
+================================================================================
+
+MalUrlGuard adalah sistem klasifikasi URL berbasis Machine Learning yang
+mendeteksi apakah sebuah URL berbahaya atau tidak secara otomatis.
+
+Sistem ini bekerja dengan cara menganalisis STRUKTUR URL itu sendiri tanpa
+perlu mengakses atau membuka halaman website tersebut. Ini disebut pendekatan
+"lexical feature extraction" — hanya membaca karakter dan pola pada URL.
+
+CONTOH KASUS NYATA:
+  - Jaringan WiFi kampus menerima request ke URL mencurigakan
+  - Sistem MalUrlGuard menganalisis URL tersebut dalam < 100ms
+  - Hasilnya: "phishing" dengan confidence 87%
+  - URL diblokir secara otomatis oleh firewall/proxy
+  - Mahasiswa tidak jadi korban phishing
+
+KEUNGGULAN DIBANDING METODE MANUAL:
+  - Kecepatan: analisis dalam milidetik (bukan menit/jam)
+  - Skala: bisa proses ribuan URL per detik
+  - Offline: tidak butuh koneksi ke cloud service berbayar
+  - Explainable: bisa dijelaskan KENAPA URL dianggap berbahaya
+  - Ringan: bisa jalan di Raspberry Pi 4 untuk edge deployment
+
+================================================================================
+2. FUNGSI UTAMA
+================================================================================
+
+FUNGSI 1 — KLASIFIKASI URL (CORE FUNCTION)
+  Menerima satu URL dan mengembalikan:
+  - Label: benign / phishing / malware / defacement
+  - Confidence: seberapa yakin model (0.0 - 1.0)
+  - Probabilitas: distribusi kemungkinan ke semua kelas
+  - Latency: waktu proses dalam milidetik
+
+FUNGSI 2 — BATCH CLASSIFICATION
+  Menerima banyak URL sekaligus (dari file CSV atau API call)
+  Berguna untuk: audit log jaringan, scan database URL, forensik
+
+FUNGSI 3 — FEATURE EXTRACTION
+  Mengurai URL menjadi 41 fitur numerik:
+  - Panjang URL, hostname, path, query
+  - Jumlah karakter khusus (titik, strip, underscore, slash, dsb)
+  - Deteksi IP address sebagai hostname
+  - Deteksi simbol @ (teknik obfuscation klasik)
+  - Entropy Shannon hostname (ukuran keacakan)
+  - Deteksi kata kunci mencurigakan (login, verify, paypal, dsb)
+  - Dan 30+ fitur lainnya (lihat Bagian 7)
+
+FUNGSI 4 — EXPLAINABILITY (SHAP)
+  Setiap prediksi bisa dijelaskan: "URL ini dianggap phishing karena..."
+  - Fitur mana yang paling berkontribusi pada prediksi
+  - Arah kontribusi: meningkatkan atau menurunkan risiko
+  - Berguna untuk: edukasi, audit, tuning model
+
+FUNGSI 5 — REST API
+  FastAPI server yang bisa diintegrasikan dengan:
+  - Web application firewall (WAF)
+  - Proxy server (Squid, Nginx)
+  - Browser extension
+  - SIEM platform (Splunk, ELK)
+  - Mobile/web app internal
+
+FUNGSI 6 — TRAINING PIPELINE
+  Melatih ulang model dengan dataset baru:
+  - Dataset sintetis (built-in, 10.000 URL)
+  - PhishTank (perlu API key gratis)
+  - Dataset custom milik sendiri (format CSV)
+
+FUNGSI 7 — DEMO DASHBOARD
+  Antarmuka visual berbasis Streamlit untuk presentasi dan demo lab:
+  - Input URL langsung di browser
+  - Visualisasi confidence bar
+  - Grafik distribusi probabilitas
+  - Riwayat 10 prediksi terakhir
+
+================================================================================
+3. ARSITEKTUR SISTEM
+================================================================================
+
+GAMBARAN BESAR:
+
+  [INPUT URL]
+      |
+      v
+  +-----------------------+
+  |   FEATURE EXTRACTOR   |  <-- lexical.py + extractor.py
+  |  (41 fitur dari URL)  |      Tidak butuh network, murni string parsing
+  +-----------+-----------+
+              |
+              v
+  +-----------+-----------+     +-----------------------+
+  | Random Forest Model   |     |   XGBoost Model       |
+  | (rf_model.joblib)     |     |   (xgb_model.joblib)  |
+  | 100 pohon keputusan   |     |   200 boosted trees   |
+  | max_depth = 20        |     |   max_depth = 8        |
+  +-----------+-----------+     +-----------+-----------+
+              |                             |
+              |     Probabilitas            |     Probabilitas
+              |     per kelas               |     per kelas
+              +-------------+--------------+
+                            |
+                            v
+              +-------------+-------------+
+              |     ENSEMBLE PREDICTOR    |
+              |  Soft Voting (weighted):  |
+              |  RF x1.0 + XGBoost x1.2  |
+              +-------------+-------------+
+                            |
+                            v
+              +-------------+-------------+
+              |   SHAP EXPLAINER          |  <-- explainer.py (opsional)
+              |   Top 5 feature SHAP      |
+              +-------------+-------------+
+                            |
+                            v
+              +-------------+-------------+
+              |   RESPONSE                |
+              |  - label                  |
+              |  - confidence             |
+              |  - probabilities          |
+              |  - top_features (SHAP)    |
+              |  - latency_ms             |
+              +---------------------------+
+
+
+PIPELINE TRAINING (satu kali, sebelum deployment):
+
+  [CSV Dataset]
+       |
+       v
+  [Feature Extraction]  -- 41 fitur per URL
+       |
+       v
+  [Train/Val/Test Split]  -- 80% / 10% / 10% stratified
+       |
+       v
+  [Train RF] --> rf_model.joblib
+  [Train XGB] --> xgb_model.joblib
+       |
+       v
+  [Evaluate]  -- accuracy, f1, confusion matrix PNG
+       |
+       v
+  [Persist]  -- models_pretrained/
+
+
+PIPELINE INFERENCE (real-time):
+
+  URL String
+    --> extract_lexical_features()     ~1ms
+    --> np.array (1x41)
+    --> rf.predict_proba()             ~60ms
+    --> xgb.predict_proba()            ~1ms
+    --> ensemble.weighted_average()    <1ms
+    --> SHAP explanation (optional)    ~5ms
+    --> JSON response
+
+
+KOMPONEN FILE:
+
+  malurlguard/features/lexical.py
+    Mengekstrak 41 fitur dari string URL menggunakan:
+    - urllib.parse (parsing URL)
+    - tldextract (TLD dan subdomain)
+    - regex (deteksi IPv4, pola khusus)
+    - math (Shannon entropy)
+
+  malurlguard/features/extractor.py
+    Orkestrasi: satu URL -> Dict fitur, atau List URL -> DataFrame
+
+  malurlguard/models/random_forest.py
+    Wrapper RandomForestClassifier scikit-learn
+    class_weight='balanced' (handle imbalanced dataset)
+
+  malurlguard/models/xgboost_model.py
+    Wrapper XGBClassifier
+    scale_pos_weight otomatis untuk kelas minoritas
+
+  malurlguard/models/ensemble.py
+    Soft voting: rata-rata tertimbang probabilitas dari semua model
+    Default weight: RF=1.0, XGBoost=1.2
+
+  malurlguard/training/dataset.py
+    Load CSV, validasi, stratified split 80/10/10
+
+  malurlguard/training/pipeline.py
+    Orkestrasi training end-to-end
+
+  malurlguard/training/evaluate.py
+    Hitung metrics + plot confusion matrix
+
+  malurlguard/inference/predictor.py
+    Load model sekali, cache di memory, layani prediksi
+
+  malurlguard/inference/explainer.py
+    SHAP TreeExplainer untuk RF dan XGBoost
+
+  malurlguard/api/main.py
+    FastAPI app dengan CORS enabled
+
+  malurlguard/api/routes.py
+    Endpoint handlers (/predict, /predict/batch, /health, /metrics)
+
+  malurlguard/api/schemas.py
+    Pydantic schemas untuk validasi request/response
+
+  malurlguard/cli.py
+    Click CLI: download, train, predict, batch, serve, dashboard
+
+  dashboard/streamlit_app.py
+    Demo dashboard visual berbasis Streamlit
+
+================================================================================
+4. CARA INSTALL
+================================================================================
+
+KEBUTUHAN SISTEM:
+  - Python 3.10 atau lebih baru (direkomendasikan 3.10-3.12)
+  - RAM minimal 2GB (4GB direkomendasikan untuk training)
+  - Storage minimal 500MB (untuk model dan dependencies)
+  - Koneksi internet (untuk install dependencies pertama kali)
+
+LANGKAH INSTALL:
+
+Langkah 1 — Masuk ke folder project
+  cd "D:\Portofolio Cyber Alif\Project 6 - Malicious URL\malurlguard"
+
+Langkah 2 — Install package dan semua dependencies
+  pip install -e .
+
+  Dependencies yang akan terinstall:
+  - scikit-learn    : Random Forest classifier
+  - xgboost         : Gradient Boosted Trees classifier
+  - pandas          : Manipulasi data
+  - numpy           : Komputasi numerik
+  - tldextract      : Parsing TLD dan subdomain dari URL
+  - shap            : Explainability (SHAP values)
+  - fastapi         : REST API framework
+  - uvicorn         : ASGI server untuk FastAPI
+  - pydantic        : Validasi data API
+  - click           : CLI framework
+  - rich            : Output terminal berwarna dan rapi
+  - joblib          : Serialisasi model
+  - streamlit       : Demo dashboard visual
+  - matplotlib      : Plot confusion matrix
+  - imbalanced-learn: SMOTE dan teknik handle imbalanced data
+  - requests        : HTTP client
+
+Langkah 3 — Verifikasi install berhasil
+  python -c "import malurlguard; print('OK, versi:', malurlguard.__version__)"
+  Output yang diharapkan: OK, versi: 0.1.0
+
+Langkah 4 — Install tambahan (opsional, untuk testing API)
+  pip install httpx2
+
+================================================================================
+5. CARA MENGGUNAKAN (CLI)
+================================================================================
+
+Semua perintah dijalankan dari dalam folder malurlguard/:
+  cd "D:\Portofolio Cyber Alif\Project 6 - Malicious URL\malurlguard"
+
+------------------------------------------------------------------------
+5.1 GENERATE DATASET (Buat Data Latih)
+------------------------------------------------------------------------
+
+PERINTAH:
+  python scripts/generate_synthetic.py
+
+ATAU lewat CLI:
+  malurlguard download
+
+FUNGSI:
+  Membuat 10.000 URL sintetis untuk melatih model.
+  Dataset berisi campuran URL benign dan malicious yang realistis.
+
+OUTPUT:
+  File: data/synthetic_urls.csv
+  Isi: 10.000 baris dengan kolom [url, label, source]
+
+DISTRIBUSI KELAS:
+  - 5.000 URL benign (0)     : GitHub, Wikipedia, Tokopedia, dll
+  - 2.500 URL phishing (1)   : Pola PayPal palsu, domain .tk/.cf/.ml
+  - 1.500 URL malware (2)    : Link .exe/.bat di domain mencurigakan
+  - 1.000 URL defacement (3) : Pola "hacked-by-", SQL injection di URL
+
+CATATAN:
+  Untuk dataset NYATA lebih akurat, gunakan PhishTank:
+  1. Daftar di https://www.phishtank.com/developer_info.php
+  2. Dapatkan API key gratis
+  3. Jalankan: set PHISHTANK_API_KEY=<api_key_kamu>
+  4. Jalankan: malurlguard download --source phishtank
+
+------------------------------------------------------------------------
+5.2 TRAINING MODEL
+------------------------------------------------------------------------
+
+PERINTAH:
+  malurlguard train --model all
+
+ATAU tanpa CLI:
+  python scripts/train_all.py
+
+OPSI TAMBAHAN:
+  --model rf        : Hanya Random Forest
+  --model xgb       : Hanya XGBoost
+  --model all       : Keduanya + Ensemble (DEFAULT)
+  --data path/file.csv   : Pakai dataset lain (default: data/synthetic_urls.csv)
+  --output folder/  : Simpan model ke folder lain (default: models_pretrained/)
+
+CONTOH:
+  malurlguard train --model all --data data/synthetic_urls.csv --output models_pretrained/
+
+PROSES YANG TERJADI:
+  1. Load CSV dataset
+  2. Ekstraksi 41 fitur dari setiap URL
+  3. Split data: 80% train, 10% validasi, 10% test
+  4. Training Random Forest (100 pohon)
+  5. Training XGBoost (200 boosted trees)
+  6. Evaluasi pada test set (accuracy, F1, confusion matrix)
+  7. Benchmark latency (mean, p50, p95, p99)
+  8. Simpan model ke models_pretrained/
+
+OUTPUT SETELAH TRAINING:
+  models_pretrained/
+  ├── rf_model.joblib              : Model Random Forest tersimpan
+  ├── xgb_model.joblib             : Model XGBoost tersimpan
+  ├── feature_names.json           : Daftar nama fitur
+  ├── metrics/
+  │   ├── metrics_rf.json          : Metric RF (accuracy, F1, dll)
+  │   ├── metrics_xgb.json         : Metric XGBoost
+  │   ├── metrics_ensemble.json    : Metric Ensemble
+  │   ├── summary.json             : Ringkasan semua model
+  │   ├── confusion_matrix_rf.png  : Visualisasi confusion matrix RF
+  │   ├── confusion_matrix_xgb.png : Visualisasi confusion matrix XGBoost
+  │   └── confusion_matrix_ensemble.png
+
+CARA BACA OUTPUT TERMINAL:
+  [rf] accuracy=0.9800 f1_macro=0.9750
+   ^     ^                  ^
+   |     |                  +-- F1-score rata-rata semua kelas (0-1, makin tinggi makin baik)
+   |     +-- Akurasi keseluruhan (0-1, makin tinggi makin baik)
+   +-- Nama model yang dievaluasi
+
+------------------------------------------------------------------------
+5.3 PREDIKSI SATU URL
+------------------------------------------------------------------------
+
+PERINTAH DASAR:
+  malurlguard predict "http://paypal-verify-account.tk/login.php?id=123"
+
+DENGAN PENJELASAN SHAP:
+  malurlguard predict "http://paypal-verify-account.tk/login.php?id=123" --explain
+
+GANTI FOLDER MODEL (jika model tidak di default):
+  malurlguard predict "https://github.com" --model-dir /path/ke/models/
+
+CONTOH URL UNTUK DICOBA:
+  # Diharapkan: BENIGN
+  malurlguard predict "https://github.com/torvalds/linux"
+  malurlguard predict "https://telkomuniversity.ac.id/en/admission"
+  malurlguard predict "https://tokopedia.com/product/item-123"
+
+  # Diharapkan: PHISHING
+  malurlguard predict "http://paypal-verify-account.tk/login.php?id=123"
+  malurlguard predict "http://192.168.1.1@banking-secure.xyz/verify?email=user@test.com"
+  malurlguard predict "http://free-prize-winner.cf/claim?id=9999&user=victim@mail.com"
+
+  # Diharapkan: MALWARE
+  malurlguard predict "http://185.220.101.5/update.exe?token=abc123"
+  malurlguard predict "http://free-keygen.pw/crack.bat"
+
+  # Diharapkan: DEFACEMENT
+  malurlguard predict "http://example.go.id/hacked-by-anonymous.html"
+  malurlguard predict "http://schoolsite.edu/index.php?id=1%27%20OR%201=1--"
+
+OUTPUT YANG DIHASILKAN:
+  URL: http://paypal-verify-account.tk/login.php?id=123
+  Label: PHISHING
+  Confidence: 75.0%
+  Latency: 2.3 ms
+
+  Probability Breakdown:
+  benign      | 0.1000 ██
+  phishing    | 0.7503 ███████████████
+  malware     | 0.1200 ██
+  defacement  | 0.0297 █
+
+  (Jika --explain aktif)
+  Top Feature Contributions (SHAP):
+  has_suspicious_keyword  = 1.0  SHAP: +0.312  (increases_risk)
+  tld_is_common           = 0.0  SHAP: +0.205  (increases_risk)
+  has_https               = 0.0  SHAP: +0.180  (increases_risk)
+  num_subdomains          = 2.0  SHAP: +0.095  (increases_risk)
+  shannon_entropy_path    = 2.1  SHAP: +0.070  (increases_risk)
+
+------------------------------------------------------------------------
+5.4 PREDIKSI MASSAL (BATCH)
+------------------------------------------------------------------------
+
+PERINTAH (output ke terminal):
+  malurlguard batch tests/fixtures/sample_urls.csv
+
+PERINTAH (output ke file CSV):
+  malurlguard batch tests/fixtures/sample_urls.csv --output hasil_scan.csv
+
+OPSI:
+  --url-col nama_kolom  : Nama kolom yang berisi URL (default: "url")
+  --output file.csv     : Simpan hasil ke CSV (default: tampilkan di terminal)
+
+FORMAT INPUT CSV:
+  URL minimal harus punya kolom bernama "url":
+    url,label
+    https://github.com,0
+    http://phishing.tk/login,1
+    http://malware.ru/update.exe,2
+
+CONTOH UNTUK AUDIT LOG JARINGAN:
+  # Asumsikan kamu punya log proxy dengan kolom "url"
+  malurlguard batch proxy_log_20240115.csv --url-col url --output hasil_audit.csv
+
+FORMAT OUTPUT CSV:
+  url,label,confidence,latency_ms
+  https://github.com,benign,0.9950,2.1
+  http://phishing.tk/login,phishing,0.8801,1.8
+  http://malware.ru/update.exe,phishing,0.7200,2.0
+
+------------------------------------------------------------------------
+5.5 MENJALANKAN REST API SERVER
+------------------------------------------------------------------------
+
+PERINTAH:
+  malurlguard serve --port 8000
+
+ATAU dengan opsi lengkap:
+  malurlguard serve --host 0.0.0.0 --port 8000
+
+DEVELOPMENT MODE (auto-reload saat kode berubah):
+  malurlguard serve --port 8000 --reload
+
+SETELAH SERVER JALAN:
+  - API docs (Swagger UI)  : http://localhost:8000/docs
+  - API docs (ReDoc)       : http://localhost:8000/redoc
+  - Health check           : http://localhost:8000/health
+
+UNTUK MENGHENTIKAN SERVER:
+  Tekan Ctrl+C di terminal tempat server berjalan
+
+------------------------------------------------------------------------
+5.6 MENJALANKAN DEMO DASHBOARD
+------------------------------------------------------------------------
+
+PERINTAH:
+  malurlguard dashboard
+
+ATAU langsung dengan Streamlit:
+  streamlit run dashboard/streamlit_app.py
+
+BROWSER AKAN TERBUKA OTOMATIS:
+  http://localhost:8501
+
+FITUR DASHBOARD:
+  - Input URL via text box
+  - Tombol classify
+  - Tombol contoh (Benign, Phishing, Malware, Defacement)
+  - Badge label berwarna (hijau=benign, merah=phishing, dll)
+  - Bar chart distribusi probabilitas
+  - Panel SHAP feature explanation (jika toggle aktif)
+  - Riwayat 10 prediksi terakhir
+
+================================================================================
+6. CARA MENGGUNAKAN (REST API)
+================================================================================
+
+Pastikan server sudah jalan: malurlguard serve --port 8000
+
+------------------------------------------------------------------------
+6.1 HEALTH CHECK
+------------------------------------------------------------------------
+
+REQUEST:
+  GET http://localhost:8000/health
+
+CURL:
+  curl http://localhost:8000/health
+
+RESPONSE:
+  {
+    "status": "ok",
+    "version": "0.1.0",
+    "models_loaded": true
+  }
+
+------------------------------------------------------------------------
+6.2 PREDIKSI SATU URL
+------------------------------------------------------------------------
+
+REQUEST:
+  POST http://localhost:8000/predict
+  Content-Type: application/json
+  Body: {"url": "...", "explain": false}
+
+CURL DASAR:
+  curl -X POST http://localhost:8000/predict \
+    -H "Content-Type: application/json" \
+    -d "{\"url\": \"http://paypal-verify-account.tk/login.php?id=123\"}"
+
+CURL DENGAN SHAP EXPLANATION:
+  curl -X POST http://localhost:8000/predict \
+    -H "Content-Type: application/json" \
+    -d "{\"url\": \"http://paypal-verify-account.tk/login.php?id=123\", \"explain\": true}"
+
+RESPONSE LENGKAP:
+  {
+    "url": "http://paypal-verify-account.tk/login.php?id=123",
+    "label": "phishing",
+    "label_id": 1,
+    "confidence": 0.7503,
+    "probabilities": {
+      "benign": 0.1000,
+      "phishing": 0.7503,
+      "malware": 0.1200,
+      "defacement": 0.0297
+    },
+    "top_features": [
+      {
+        "feature": "has_suspicious_keyword",
+        "value": 1.0,
+        "shap_value": 0.312,
+        "direction": "increases_risk"
+      },
+      ...
+    ],
+    "latency_ms": 2.3
+  }
+
+FIELD RESPONSE EXPLAINED:
+  label         : Kategori prediksi (benign/phishing/malware/defacement)
+  label_id      : Index numerik (0=benign, 1=phishing, 2=malware, 3=defacement)
+  confidence    : Probabilitas tertinggi (0.0 - 1.0, makin tinggi makin yakin)
+  probabilities : Distribusi probabilitas ke semua 4 kelas (total = 1.0)
+  top_features  : Fitur yang paling mempengaruhi prediksi (jika explain=true)
+  latency_ms    : Waktu proses dalam milidetik
+
+INTEGRASI KE PYTHON:
+  import requests
+  resp = requests.post("http://localhost:8000/predict",
+                       json={"url": "http://evil-phish.tk/login", "explain": False})
+  result = resp.json()
+  print(result["label"], result["confidence"])
+
+------------------------------------------------------------------------
+6.3 PREDIKSI BATCH
+------------------------------------------------------------------------
+
+REQUEST:
+  POST http://localhost:8000/predict/batch
+  Body: {"urls": ["url1", "url2", ...], "explain": false}
+  Maksimum: 500 URL per request
+
+CURL:
+  curl -X POST http://localhost:8000/predict/batch \
+    -H "Content-Type: application/json" \
+    -d "{\"urls\": [\"https://github.com\", \"http://phish.tk/login\"]}"
+
+RESPONSE:
+  {
+    "results": [
+      {"url": "https://github.com", "label": "benign", "confidence": 0.9950, ...},
+      {"url": "http://phish.tk/login", "label": "phishing", "confidence": 0.8800, ...}
+    ],
+    "total": 2,
+    "total_latency_ms": 15.3
+  }
+
+------------------------------------------------------------------------
+6.4 METRICS
+------------------------------------------------------------------------
+
+REQUEST:
+  GET http://localhost:8000/metrics
+
+CURL:
+  curl http://localhost:8000/metrics
+
+RESPONSE:
+  {
+    "models": {
+      "random_forest": "models_pretrained/rf_model.joblib",
+      "xgboost": "models_pretrained/xgb_model.joblib"
+    },
+    "feature_count": 41
+  }
+
+================================================================================
+7. PENJELASAN FITUR (41 FITUR LEXICAL)
+================================================================================
+
+Semua fitur diekstrak HANYA dari string URL — tanpa koneksi jaringan.
+
+KATEGORI A: FITUR PANJANG (5 fitur)
+  url_length              : Panjang total URL
+                            Phishing URL cenderung panjang untuk menyembunyikan domain asli
+
+  hostname_length         : Panjang hostname (contoh: "paypal-secure-login.tk" = 22)
+                            Domain palsu cenderung panjang dan aneh
+
+  path_length             : Panjang path setelah domain
+                            Phishing sering punya path panjang dengan parameter banyak
+
+  query_length            : Panjang query string (setelah ?)
+                            Banyak parameter = lebih suspicious
+
+  fragment_length         : Panjang fragment (setelah #)
+                            Jarang dipakai di URL legitim dengan cara mencurigakan
+
+KATEGORI B: FITUR JUMLAH KARAKTER (14 fitur)
+  num_dots                : Jumlah titik (.)
+                            Contoh: "paypal.secure.login.com.evil.tk" = 5 titik = suspicious
+
+  num_dashes              : Jumlah strip (-)
+                            Contoh: "paypal-secure-verify-account.tk" = 3 strip = suspicious
+
+  num_underscores         : Jumlah underscore (_)
+  num_slashes             : Jumlah slash (/)
+  num_equals              : Jumlah tanda sama dengan (=) — indikator banyak parameter
+  num_questionmarks       : Jumlah tanda tanya (?)
+  num_ampersands          : Jumlah & — indikator banyak parameter GET
+  num_percent             : Jumlah % — URL encoding (sering dipakai untuk obfuskasi)
+  num_at                  : Jumlah @ — teknik obfuskasi klasik phishing
+  num_digits              : Jumlah angka dalam URL
+  num_letters             : Jumlah huruf dalam URL
+  ratio_digits_to_total   : Rasio angka vs total karakter
+                            IP-based URL punya rasio tinggi
+
+  num_special_chars       : Karakter non-standar di URL
+                            Obfuskasi sering pakai karakter aneh
+
+  num_query_params        : Jumlah parameter query
+                            URL phishing sering kirim banyak data lewat query
+
+KATEGORI C: FITUR DETEKSI POLA (10 fitur)
+  has_ip_as_hostname      : 1 jika hostname adalah IPv4 (misal: 192.168.1.1)
+                            SANGAT mencurigakan — URL legitim jarang pakai IP langsung
+                            Contoh: http://185.220.101.5/update.exe
+
+  has_at_symbol           : 1 jika URL mengandung @
+                            Teknik obfuskasi: http://legitimate.com@evil.tk/
+                            Browser akan mengunjungi evil.tk, bukan legitimate.com!
+
+  has_port                : 1 jika URL pakai port non-standar (bukan 80/443)
+                            Contoh: http://evil.tk:8080/payload
+
+  has_https               : 1 jika scheme adalah https
+                            Phishing modern juga pakai HTTPS, tapi ini tetap fitur relevan
+
+  has_double_slash_in_path: 1 jika ada // di dalam path (bukan di scheme)
+                            Teknik redirect tersembunyi
+
+  has_punycode            : 1 jika hostname ada xn-- (IDN/Punycode)
+                            Dipakai untuk spoof domain: xn--pple.com mirip apple.com
+
+  has_https_in_hostname   : 1 jika kata "https" ada DI DALAM hostname
+                            Anti-pattern klasik: http://https-paypal.com/login
+                            Dirancang untuk menipu user yang baca URL sekilas
+
+  has_suspicious_keyword  : 1 jika URL mengandung kata kunci berisiko
+                            List: login, signin, verify, secure, account, update,
+                                  confirm, banking, paypal, ebay, amazon, apple,
+                                  microsoft, google, facebook, password, dll (30+ kata)
+
+  suspicious_keyword_count: Jumlah kata kunci mencurigakan yang ditemukan
+                            Makin banyak = makin suspicious
+
+  has_double_slash_in_path: Deteksi open redirect via //target.domain
+
+KATEGORI D: FITUR TLD DAN SUBDOMAIN (4 fitur)
+  tld_length              : Panjang TLD (top-level domain)
+                            .tk = 2, .co.id = 5, .com = 3
+
+  tld_is_common           : 1 jika TLD dari daftar terpercaya
+                            Terpercaya: com, org, net, id, co.id, ac.id, go.id, dll
+                            Tidak terpercaya: .tk, .ml, .ga, .cf, .gq, .xyz, .pw
+
+  num_subdomains          : Jumlah level subdomain
+                            Contoh: sub1.sub2.evil.tk = 2 subdomain = suspicious
+
+  subdomain_length_avg    : Rata-rata panjang token subdomain
+                            Subdomain panjang dan acak = suspicious
+
+KATEGORI E: FITUR ENTROPI DAN LINGUISTIK (7 fitur)
+  shannon_entropy_hostname: Ukuran keacakan hostname (0 = sangat teratur, 5+ = acak)
+                            Domain C2 (command-and-control) sering DGA = entropi tinggi
+                            Contoh: "a3x9k2mq.evil.tk" = entropi tinggi
+                            Contoh: "github.com" = entropi rendah
+
+  shannon_entropy_path    : Ukuran keacakan path
+                            Path dengan token random panjang = mencurigakan
+
+  has_punycode            : (lihat di atas)
+  percent_encoding_ratio  : Rasio % encoding dalam URL
+  longest_token_length    : Panjang token terpanjang (split by . / - _)
+  num_tokens              : Jumlah token setelah split
+  max_consecutive_consonants: Konsonan berturutan maksimal di hostname
+                              Kata gibberish punya banyak konsonan berturutan
+                              Contoh: "kxzmvq.tk" vs "paypal.com"
+
+  vowel_ratio             : Rasio vokal dalam hostname
+                            Kata nyata: vokal ~40%, kata random: lebih rendah
+
+KATEGORI F: FITUR DOMAIN (2 fitur)
+  domain_length           : Panjang domain (tanpa TLD)
+  registered_domain_length: Panjang domain terdaftar lengkap
+
+================================================================================
+8. PENJELASAN MODEL MACHINE LEARNING
+================================================================================
+
+MODEL 1: RANDOM FOREST
+  Algoritma: RandomForestClassifier (scikit-learn)
+  Cara kerja:
+    - Membuat 100 "pohon keputusan" berbeda dari subset data dan fitur
+    - Setiap pohon vote untuk kelas tertentu
+    - Final prediction = mayoritas vote
+    - Pohon-pohon yang berbeda mengurangi overfitting (ensemble learning)
+  Parameter:
+    - n_estimators = 100 (jumlah pohon)
+    - max_depth = 20 (kedalaman maksimal tiap pohon)
+    - class_weight = 'balanced' (kompensasi kelas minoritas)
+    - n_jobs = -1 (pakai semua CPU core)
+  Keunggulan: Robust, interpretable, feature importance built-in
+  Kelemahan: Lambat untuk dataset besar, model file besar
+
+MODEL 2: XGBOOST
+  Algoritma: XGBClassifier (xgboost library)
+  Cara kerja:
+    - Membangun 200 pohon secara bertahap (boosting)
+    - Setiap pohon baru fokus memperbaiki kesalahan pohon sebelumnya
+    - Teknik regularisasi mencegah overfitting
+  Parameter:
+    - n_estimators = 200 (jumlah iterasi boosting)
+    - max_depth = 8 (kedalaman lebih dangkal dari RF, mencegah overfit)
+    - learning_rate = 0.1 (seberapa besar koreksi tiap iterasi)
+    - scale_pos_weight = auto (kompensasi imbalanced class)
+  Keunggulan: Sangat akurat, cepat (inference ~1ms), state-of-the-art tabular
+  Kelemahan: Lebih susah di-tune, black-box tanpa SHAP
+
+MODEL 3: ENSEMBLE (KOMBINASI)
+  Metode: Soft Voting dengan bobot
+  Cara kerja:
+    - RF menghasilkan: [P(benign)=0.10, P(phishing)=0.80, P(malware)=0.06, P(def)=0.04]
+    - XGB menghasilkan: [P(benign)=0.08, P(phishing)=0.72, P(malware)=0.14, P(def)=0.06]
+    - Ensemble = RF*1.0 + XGB*1.2 dibagi total bobot (2.2)
+    - Final: [benign=0.089, phishing=0.758, malware=0.102, def=0.051]
+    - Kelas dengan probabilitas tertinggi = prediksi final
+  Keunggulan: Lebih robust dari model tunggal, mengurangi variance
+  Bobot XGB lebih tinggi (1.2 vs 1.0) karena latency lebih cepat dan akurasi
+  sering sedikit lebih baik untuk tabular data
+
+METRIK EVALUASI:
+  Accuracy    : (Prediksi Benar) / (Total Prediksi)
+                Mudah dipahami tapi bisa menyesatkan pada data tidak seimbang
+
+  Precision   : (True Positive) / (True Positive + False Positive)
+                Dari semua yang diprediksi phishing, berapa % yang benar phishing?
+                Tinggi precision = sedikit false alarm
+
+  Recall      : (True Positive) / (True Positive + False Negative)
+                Dari semua phishing sesungguhnya, berapa % yang berhasil terdeteksi?
+                Tinggi recall = sedikit yang lolos
+
+  F1-Score    : 2 * (Precision * Recall) / (Precision + Recall)
+                Harmonic mean dari precision dan recall
+                Metrik paling fair untuk dataset tidak seimbang
+
+  Confusion Matrix: Tabel prediksi vs actual per kelas
+                    Bisa lihat di models_pretrained/metrics/confusion_matrix_*.png
+
+EXPLAINABILITY (SHAP):
+  SHAP = SHapley Additive exPlanations
+  Menggunakan konsep dari game theory untuk menghitung kontribusi tiap fitur
+  Cara baca output SHAP:
+    - Nilai SHAP positif (+) = fitur ini MENINGKATKAN prediksi kelas saat ini
+    - Nilai SHAP negatif (-) = fitur ini MENURUNKAN prediksi kelas saat ini
+    - Nilai absolut |SHAP| = seberapa besar pengaruhnya
+  Contoh interpretasi:
+    has_suspicious_keyword = 1.0, SHAP = +0.312, direction = increases_risk
+    Artinya: URL ini mengandung keyword mencurigakan, dan itu BERKONTRIBUSI BESAR
+             terhadap prediksi "phishing"
+
+================================================================================
+9. PENJELASAN LABEL / KATEGORI
+================================================================================
+
+LABEL 0 — BENIGN (AMAN)
+  Deskripsi: URL yang aman dan legitimate
+  Contoh:
+    - https://github.com/user/repo
+    - https://telkomuniversity.ac.id/admission
+    - https://tokopedia.com/product/123
+    - https://wikipedia.org/wiki/Machine_learning
+  Karakteristik URL benign:
+    - Domain dikenal dan terverifikasi
+    - HTTPS (biasanya)
+    - TLD umum (.com, .org, .id, .ac.id)
+    - Tidak ada kata kunci phishing
+    - Struktur URL bersih dan dapat dibaca
+
+LABEL 1 — PHISHING (PENGELABUAN)
+  Deskripsi: URL yang menyamar sebagai situs legitimate untuk mencuri
+             kredensial (username, password, data kartu kredit)
+  Contoh:
+    - http://paypal-secure-login.tk/verify.php?id=123
+    - http://192.168.1.1@bankbca-secure.xyz/login
+    - http://update-apple-id.cf/signin?next=/dashboard
+  Karakteristik URL phishing:
+    - Domain mirip brand terkenal tapi beda (paypal-secure.tk)
+    - TLD murah/gratis (.tk, .ml, .cf, .gq, .xyz)
+    - Mengandung kata kunci: login, verify, secure, account, update
+    - Kadang pakai IP address sebagai hostname
+    - Kadang pakai simbol @ untuk redirect tersembunyi
+
+LABEL 2 — MALWARE (PENYEBARAN MALWARE)
+  Deskripsi: URL yang mendistribusikan software berbahaya
+             (virus, trojan, ransomware, spyware)
+  Contoh:
+    - http://185.220.101.5/update.exe
+    - http://free-keygen.xyz/crack.bat
+    - http://evil.ru/wp-content/uploads/shell.php
+    - http://update-flash-player.net/flash_installer.exe
+  Karakteristik URL malware:
+    - Berisi ekstensi file executable (.exe, .bat, .ps1, .vbs, .dll)
+    - Domain mencurigakan atau IP langsung
+    - Path berisi kata: download, update, crack, keygen, patch
+    - HTTP (bukan HTTPS)
+    - Domain baru dan tidak dikenal
+
+LABEL 3 — DEFACEMENT (PERUSAKAN WEBSITE)
+  Deskripsi: URL yang mengarah ke halaman website yang telah dirusak oleh
+             hacker, atau URL yang mengandung pola serangan web
+             (SQL injection, path traversal, LFI/RFI, dsb)
+  Contoh:
+    - http://targetsite.go.id/hacked-by-TeamXsploit.html
+    - http://victim.edu/index.php?id=1' OR 1=1--
+    - http://target.com/.git/config
+    - http://site.com/phpmyadmin/index.php
+    - http://victim.org/?page=../../../../etc/passwd
+  Karakteristik URL defacement:
+    - Mengandung pola "hacked-by-" atau nama grup hacker
+    - SQL injection patterns (%27, ' OR, UNION SELECT)
+    - Path traversal (../../, %2e%2e)
+    - Akses file sensitif (.git, .env, backup.sql, phpinfo.php)
+
+CATATAN PENTING:
+  Klasifikasi bersifat probabilistik, bukan absolut.
+  Sebuah URL bisa punya ciri phishing sekaligus malware.
+  Ensemble model memberikan probabilitas ke SEMUA 4 kelas.
+  Kelas dengan probabilitas tertinggi yang menjadi prediksi final.
+
+================================================================================
+10. CONTOH OUTPUT DAN CARA MEMBACANYA
+================================================================================
+
+CONTOH 1: URL PHISHING TERDETEKSI
+
+  Input: http://paypal-verify-account.tk/login.php?id=123&token=abc456
+
+  Output CLI:
+  ------------------------------------
+  URL: http://paypal-verify-account.tk/login.php?id=123&token=abc456
+  Label: PHISHING          <-- Kategori prediksi
+  Confidence: 75.0%        <-- Model 75% yakin ini phishing
+  Latency: 2.3 ms          <-- Waktu proses 2.3 milidetik
+
+  Probability Breakdown:
+  benign      | 0.1000  ██
+  phishing    | 0.7503  ███████████████  <-- tertinggi = prediksi final
+  malware     | 0.1200  ███
+  defacement  | 0.0297  █
+
+  Top Feature Contributions (SHAP):
+  has_suspicious_keyword   = 1.0  SHAP: +0.312  increases_risk
+                             ^URL mengandung "paypal", "verify", "login"
+  tld_is_common            = 0.0  SHAP: +0.205  increases_risk
+                             ^TLD .tk bukan TLD terpercaya
+  has_https                = 0.0  SHAP: +0.180  increases_risk
+                             ^Tidak pakai HTTPS
+  num_equals               = 2.0  SHAP: +0.095  increases_risk
+                             ^2 parameter di query string (id dan token)
+  url_length               = 62   SHAP: +0.070  increases_risk
+                             ^URL cukup panjang
+  ------------------------------------
+  Interpretasi: URL ini SANGAT MENCURIGAKAN karena (1) mengandung kata kunci
+  phishing klasik "paypal", "verify", "login" di domain, (2) menggunakan TLD .tk
+  yang gratis dan sering dipakai phisher, (3) tidak pakai HTTPS.
+  REKOMENDASI: BLOKIR URL ini.
+
+CONTOH 2: URL BENIGN
+
+  Input: https://github.com/torvalds/linux
+
+  Output CLI:
+  ------------------------------------
+  URL: https://github.com/torvalds/linux
+  Label: BENIGN
+  Confidence: 100.0%
+  Latency: 1.8 ms
+
+  Probability Breakdown:
+  benign      | 0.9950  ████████████████████
+  phishing    | 0.0020
+  malware     | 0.0015
+  defacement  | 0.0015
+  ------------------------------------
+  Interpretasi: URL ini SANGAT AMAN. Domain github.com terkenal,
+  menggunakan HTTPS, TLD .com, tidak ada kata kunci mencurigakan.
+  REKOMENDASI: IZINKAN akses.
+
+CONTOH 3: API RESPONSE JSON
+
+  POST /predict dengan explain=true
+
+  {
+    "url": "http://paypal-verify-account.tk/login.php?id=123",
+    "label": "phishing",      <-- kategori prediksi
+    "label_id": 1,            <-- index numerik (0=benign, 1=phishing, 2=malware, 3=defacement)
+    "confidence": 0.7503,     <-- 75.03% yakin
+    "probabilities": {
+      "benign": 0.1000,       <-- 10% kemungkinan benign
+      "phishing": 0.7503,     <-- 75% kemungkinan phishing (TERTINGGI)
+      "malware": 0.1200,      <-- 12% kemungkinan malware
+      "defacement": 0.0297    <-- 3% kemungkinan defacement
+    },
+    "top_features": [
+      {
+        "feature": "has_suspicious_keyword",
+        "value": 1.0,         <-- fitur bernilai 1 (TRUE)
+        "shap_value": 0.3120, <-- kontribusi positif besar terhadap prediksi phishing
+        "direction": "increases_risk"
+      }
+    ],
+    "latency_ms": 2.3
+  }
+
+================================================================================
+11. STRUKTUR FOLDER PROJECT
+================================================================================
+
+malurlguard/
+├── malurlguard/                    # Package utama
+│   ├── __init__.py                 # Versi package
+│   ├── cli.py                      # Semua command CLI (download/train/predict/serve/dashboard)
+│   │
+│   ├── features/                   # Modul ekstraksi fitur
+│   │   ├── __init__.py
+│   │   ├── lexical.py              # 41 fitur dari string URL (core feature engine)
+│   │   ├── host_based.py           # Fitur DNS/WHOIS (opsional, butuh network)
+│   │   └── extractor.py            # Orkestrasi: single URL atau batch -> DataFrame
+│   │
+│   ├── models/                     # Implementasi model ML
+│   │   ├── __init__.py
+│   │   ├── base.py                 # Abstract base class untuk semua model
+│   │   ├── random_forest.py        # Wrapper RandomForestClassifier
+│   │   ├── xgboost_model.py        # Wrapper XGBClassifier
+│   │   └── ensemble.py             # Soft voting ensemble
+│   │
+│   ├── training/                   # Pipeline training
+│   │   ├── __init__.py
+│   │   ├── dataset.py              # Load CSV, validasi, stratified split
+│   │   ├── pipeline.py             # Orkestrasi training end-to-end
+│   │   └── evaluate.py             # Metrics + confusion matrix plot
+│   │
+│   ├── inference/                  # Modul prediksi
+│   │   ├── __init__.py
+│   │   ├── predictor.py            # Load model (cached), predict single/batch
+│   │   └── explainer.py            # SHAP explanation per URL
+│   │
+│   └── api/                        # REST API
+│       ├── __init__.py
+│       ├── main.py                 # FastAPI app setup + CORS
+│       ├── schemas.py              # Pydantic request/response schemas
+│       └── routes.py               # Handler untuk tiap endpoint
+│
+├── scripts/                        # Script utilitas
+│   ├── generate_synthetic.py       # Generate 10.000 URL sintetis
+│   ├── download_datasets.py        # Download PhishTank atau generate sintetis
+│   ├── train_all.py                # Shortcut training semua model
+│   ├── test_predictions.py         # Test prediksi pada sample URL
+│   └── benchmark.py                # Benchmark latency inference
+│
+├── dashboard/
+│   └── streamlit_app.py            # Demo dashboard visual
+│
+├── tests/                          # Unit dan integration tests
+│   ├── __init__.py
+│   ├── test_features.py            # 14 test untuk feature extraction
+│   ├── test_predict.py             # 8 test untuk predictor (butuh trained model)
+│   └── fixtures/
+│       └── sample_urls.csv         # 10 URL sample untuk testing
+│
+├── models_pretrained/              # Model tersimpan (buat setelah training)
+│   ├── rf_model.joblib
+│   ├── xgb_model.joblib
+│   ├── feature_names.json
+│   └── metrics/
+│       ├── metrics_rf.json
+│       ├── metrics_xgb.json
+│       ├── metrics_ensemble.json
+│       ├── summary.json
+│       ├── confusion_matrix_rf.png
+│       ├── confusion_matrix_xgb.png
+│       └── confusion_matrix_ensemble.png
+│
+├── data/                           # Dataset
+│   ├── readme.md                   # Petunjuk download dataset nyata
+│   └── synthetic_urls.csv          # Dataset sintetis (dibuat oleh generate_synthetic.py)
+│
+├── pyproject.toml                  # Konfigurasi package dan dependencies
+├── .gitignore                      # File yang tidak di-commit ke git
+├── README.md                       # Dokumentasi dalam bahasa Inggris
+└── PANDUAN_PENGGUNAAN.txt          # FILE INI — panduan dalam Bahasa Indonesia
+
+================================================================================
+12. TROUBLESHOOTING
+================================================================================
+
+MASALAH: 'malurlguard' is not recognized
+  PENYEBAB: Entry point CLI tidak terdaftar di PATH
+  SOLUSI:
+    pip install -e .
+    Pastikan Scripts/ Python ada di PATH
+    Atau gunakan: python -m malurlguard.cli [perintah]
+
+MASALAH: ModuleNotFoundError: No module named 'tldextract'
+  PENYEBAB: Dependencies belum terinstall lengkap
+  SOLUSI:
+    pip install tldextract shap xgboost scikit-learn
+
+MASALAH: FileNotFoundError: No trained models found
+  PENYEBAB: Model belum ditraining
+  SOLUSI:
+    1. python scripts/generate_synthetic.py
+    2. malurlguard train --model all
+
+MASALAH: Model loading sangat lambat (>2 detik)
+  PENYEBAB: Normal di panggilan pertama — model dibaca dari disk ke memory
+  SOLUSI: Panggilan berikutnya akan cepat karena model di-cache
+          Untuk API server, model di-cache sejak startup
+
+MASALAH: Akurasi rendah di URL tertentu
+  PENYEBAB: Model dilatih dengan data sintetis, bukan URL nyata
+  SOLUSI:
+    1. Gunakan dataset PhishTank nyata (lihat Section 5.1)
+    2. Tambahkan host-based features (DNS, WHOIS) dengan --host-features
+    3. Tambahkan data dari jaringan kampus sendiri sebagai training data
+
+MASALAH: URL malware diklasifikasikan sebagai phishing
+  PENYEBAB: Wajar — URL malware berbasis IP memiliki fitur yang mirip phishing
+            (IP sebagai hostname, suspicious keywords, TLD buruk)
+  SOLUSI: Akan diperbaiki di Phase 2 dengan LSTM char-level model
+
+MASALAH: UnicodeEncodeError saat print di Windows
+  PENYEBAB: Terminal Windows (cmd/PowerShell) default encoding cp1252
+  SOLUSI:
+    set PYTHONIOENCODING=utf-8
+    Atau gunakan Windows Terminal yang support UTF-8
+
+MASALAH: SHAP explanation tidak muncul
+  PENYEBAB: Package shap belum terinstall atau gagal import
+  SOLUSI:
+    pip install shap
+    Sistem akan fallback ke feature importance manual jika SHAP gagal
+
+================================================================================
+13. ROADMAP FASE BERIKUTNYA
+================================================================================
+
+FASE 2 (Minggu 4) — LSTM Char-level Model
+  - Implementasi malurlguard/models/lstm_url.py
+  - Char-level tokenization URL (vocab ~80 karakter)
+  - Arsitektur: Embedding(32) -> LSTM(64) x2 -> Dense(32) -> Softmax(4)
+  - Berguna untuk deteksi domain yang terlihat normal tapi tetap berbahaya
+  - Training dengan PyTorch, inference lewat torch.load()
+
+FASE 3 (Minggu 5) — Integrasi Feed Nyata
+  - PhishTank real-time feed (update setiap jam)
+  - APWG eCrime data feed
+  - Retrain otomatis setiap minggu dengan data baru
+
+FASE 4 (Minggu 6) — Edge Deployment
+  - Docker image multi-arch (AMD64 + ARM64 untuk Raspberry Pi)
+  - Optimasi model dengan ONNX untuk inference lebih cepat
+  - Integrasi dengan Squid Proxy untuk filter di jaringan WiFi kampus
+  - Dashboard monitoring real-time di lab WiFi MBC
+
+FASE 5 (Minggu 7+) — Research Paper
+  - Eksperimen dengan dataset Indonesia (.id domains)
+  - Bandingkan dengan metode lain (VirusTotal, URLhaus, heuristic rules)
+  - Target jurnal: ICACSIS, SNIA, atau Sinta 2
+  - Judul kandidat:
+    "Lightweight Ensemble ML for Malicious URL Detection in
+     Indonesian Public Campus Networks"
+
+================================================================================
+END OF FILE — MALURLGUARD PANDUAN PENGGUNAAN LENGKAP
+MBC Telkom University Network Security Lab | 2024
+================================================================================
